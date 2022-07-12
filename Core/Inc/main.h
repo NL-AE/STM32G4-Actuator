@@ -42,6 +42,13 @@ extern "C" {
 /* Exported constants --------------------------------------------------------*/
 /* USER CODE BEGIN EC */
 
+// FOC related
+#define PI 		3.14159274101f
+#define PI2		6.28318530718f
+#define SQRT3 	1.73205080757f
+#define SQRT3_2	0.86602540378f
+#define SQRT1_3	0.57735026919f
+
 /* USER CODE END EC */
 
 /* Exported macro ------------------------------------------------------------*/
@@ -49,12 +56,31 @@ extern "C" {
 
 /* USER CODE END EM */
 
-void HAL_TIM_MspPostInit(TIM_HandleTypeDef *htim);
-
 /* Exported functions prototypes ---------------------------------------------*/
 void Error_Handler(void);
 
 /* USER CODE BEGIN EFP */
+
+// ADC
+void  ADC_Get_Raw    (int16_t*i_a_Raw, int16_t*i_b_Raw, int16_t*PVDD_Raw, int16_t*Temp_Raw);	// Reads all ADCs
+void  ADC_Filter_Curr(int16_t i_a_Raw, int16_t i_b_Raw, int16_t*i_a_Fil, int16_t*i_b_Fil);		// Put ADC readings into filter
+void  ADC_Norm_Curr  (int16_t i_a_Fil, int16_t i_b_Fil, float*i_a, float*i_b);					// Normalise ADC values to currents
+void  ADC_Filter_Misc(int16_t PVDD_Raw, int16_t Temp_Raw, int16_t*PVDD_Fil, int16_t*Temp_Fil);	// Put ADC readings into filter
+void  ADC_Norm_Misc  (int16_t PVDD_Fil, int16_t Temp_Fil, float*PVDD, float*Temp);				// Normalise ADC values to properties
+// Encoder
+void  ENC_Read_Ang(float*Angle);				// ask for encoder angle over SPI
+void  ENC_Read_Vel(float*Velocity);				// ask for encoder velocity over SPI
+void  ENC_Write(uint8_t com1, uint8_t com2, uint8_t data1, uint8_t data2, uint8_t mask1, uint8_t mask2);
+void  IF_B_Int(void);									// Phase B interrupt for encoder
+void  ENC_Filter (int16_t IIF_Raw, uint32_t dIIF_Raw, int16_t*IIF_Fil, uint32_t*dIIF_Fil);	// Filter
+void  ENC_Norm   (int16_t IIF_Fil, uint32_t dIIF_Fil, float*theta, float*dtheta);			// Normalise encoder values
+// FOC stuff
+void  Set_PWM3(float DC_1, float DC_2, float DC_3);		// set duty cycle values for channels A,B,C
+float _sin(float theta);								// sin(theta)
+float _cos(float theta);								// cos(theta)
+// Interrupts
+void  FOC_Interrupt(void);		// FOC interrupt
+void  CAN_Interrupt(void);		// CAN RX interrupt
 
 /* USER CODE END EFP */
 
@@ -73,6 +99,7 @@ void Error_Handler(void);
 #define IF_A_GPIO_Port GPIOA
 #define IF_B_Pin GPIO_PIN_6
 #define IF_B_GPIO_Port GPIOA
+#define IF_B_EXTI_IRQn EXTI9_5_IRQn
 #define T_Sen_Pin GPIO_PIN_7
 #define T_Sen_GPIO_Port GPIOA
 #define V_Sen_Pin GPIO_PIN_0
@@ -85,8 +112,8 @@ void Error_Handler(void);
 #define LED_Y_GPIO_Port GPIOB
 #define LED_G_Pin GPIO_PIN_14
 #define LED_G_GPIO_Port GPIOB
-#define SPI_NSS_Pin GPIO_PIN_15
-#define SPI_NSS_GPIO_Port GPIOA
+#define SPI_CS_Pin GPIO_PIN_15
+#define SPI_CS_GPIO_Port GPIOA
 #define SPI_SCK_Pin GPIO_PIN_10
 #define SPI_SCK_GPIO_Port GPIOC
 #define SPI_MOSI_Pin GPIO_PIN_5

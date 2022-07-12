@@ -18,57 +18,174 @@
 /* USER CODE END Header */
 /* Includes ------------------------------------------------------------------*/
 #include "main.h"
+#include "adc.h"
+#include "dma.h"
+#include "fdcan.h"
+#include "spi.h"
+#include "tim.h"
+#include "gpio.h"
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
-
+#include "stdio.h"
+#include <stdint.h>
+#include <math.h>
+#include "sin_lookup.h"
+#include "stm32g4xx_it.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
 /* USER CODE BEGIN PTD */
-
 /* USER CODE END PTD */
 
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
 
+#define REV 1		// code revision
+#define PRINT 1		// want prints?
+
+// Phase Mappings
+#define Phase_A_Ch TIM_CHANNEL_4
+#define Phase_B_Ch TIM_CHANNEL_3
+#define Phase_C_Ch TIM_CHANNEL_1
+
+// CAN ID (actuator)
+#define CAN_TX_ID 2		// Transmits as this ID
+#define CAN_RX_ID 1		// Receives messages from this ID
+
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
 /* USER CODE BEGIN PM */
-
 /* USER CODE END PM */
 
 /* Private variables ---------------------------------------------------------*/
-ADC_HandleTypeDef hadc1;
-ADC_HandleTypeDef hadc2;
-
-FDCAN_HandleTypeDef hfdcan1;
-
-SPI_HandleTypeDef hspi3;
-
-TIM_HandleTypeDef htim2;
 
 /* USER CODE BEGIN PV */
 
-uint8_t count;
+// Encoder
+typedef struct
+{
+	uint8_t	SPI_Buffer[4];		// Buffer for SPI
+
+	float SPI_theta;			// IIF from SPI 0-360deg used to zero
+
+	int16_t  IIF_Counter;		// The counter variable that is interrupt driven so dont use it in calculations
+	int64_t  IIF_Revolutions;	// Number of full revolutions taken
+	uint16_t IIF_Raw;			// Current angle 0-4095
+} ENC_Struct;
+// ADC
+typedef struct
+{
+	float VDDA;
+
+	uint32_t ADC1_DMA_Buff[2];		// DMA buffer for ADC 1
+	uint32_t ADC2_DMA_Buff[2];		// DMA buffer for ADC 2
+
+	float PVDD, V_bat_R_Bot, V_bat_R_Top;		// Temp_V_Offset/V 	and Resistor divider for PVDD	V1: V_o = Vin * R2 / (R1+R2)
+	float Temp, Temp_V_Offset, Temp_Slope;		// Board temp 		and thermocouple properties		LM60: V_o = (6.25mV * T/C) + 424mV
+
+	int16_t i_a_Raw, i_b_Raw, PVDD_Raw, Temp_Raw;	// Raw ADC readings
+	int16_t i_a_Fil, i_b_Fil, PVDD_Fil, Temp_Fil;	// Filtered ADC readings
+
+	float R_Shunt_Res;					// Shunt resistor resistance /ohms
+	int SO_Gain;						// Gain of sense amp
+	int16_t SO_A_Offset, SO_B_Offset;	// Raw offset of sense amp
+} ADC_Struct;
+// FOC
+typedef struct
+{
+	// PWM repetition counter (RCR)
+	int RCR;		// current counter
+	int RCR_n;		// total counter cycles
+
+	// Proprties
+	int Pole_Pairs;				// number of pole pairs
+	float dt;					// delta T of FOC response		/seconds
+
+	// Angles
+	float m_theta, m_dtheta;	// mechanical theta and dtheta	/deg		/degs-1
+	float e_theta, e_dtheta;	// electrical theta and dtheta	/deg		/degs-1
+
+	// FOC currents
+	float i_a, i_b, i_c;		// Phase currents				/amps
+	float i_alph, i_beta;		// Alpha/Beta currents			/amps
+	float i_d, i_q;				// Direct/Quadrature currents	/amps
+
+	// Current target
+	float DC_I;					// 0 to 1 of the duty cycle controlling current
+
+	// FOC sector control
+	float alpha;				// Angle from start of sector to current position
+	int sector;					// which sector currently in
+
+	// Duty cycles
+	float DC_1, DC_2, DC_0;		// Duty cycle of vector start, end and unforced
+
+	uint16_t PWM_Reg_Max;		// PWM register max
+	float PWM_A, PWM_C, PWM_B;	// Duty cycle
+} FOC_Struct;
+// Filter
+typedef struct
+{
+	// Butterworth from: https://www.meme.net.au/butterworth.html
+	// At 6.667KHz smapling
+	// y(i) = k1*x(i) + k1*x(i-1) + k2*y(i-1)
+
+	// Filters i_a, i_b, PVDD, Temp, IIF count, IIF vel
+
+	float i_k[2];		// Filter coefficients for current filters
+	float Misc_k[2];	// Filter coefficients for misc filter
+
+	int16_t i_a_Pre, i_a_Pre_Fil, i_b_Pre, i_b_Pre_Fil;			// Previous values for current
+	int16_t PVDD_Pre, PVDD_Pre_Fil, Temp_Pre, Temp_Pre_Fil;		// Previous values for PVDD and temp
+} FIL_Struct;
+// CAN
+typedef struct
+{
+	uint32_t timeout;		// timeout/ms
+
+	FDCAN_RxHeaderTypeDef rx_header;
+	uint8_t rx_data[6];
+
+	FDCAN_TxHeaderTypeDef tx_header;
+	uint8_t tx_data[6];
+
+	FDCAN_FilterTypeDef filter;
+} CAN_Struct;
+// Controller
+typedef struct
+{
+	float Torque;
+	float Velocity;
+} CON_Struct;
+
+ENC_Struct enc;
+ADC_Struct adc;
+FOC_Struct foc;
+FIL_Struct fil;
+CAN_Struct can;
+CON_Struct con;
 
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
 void SystemClock_Config(void);
-static void MX_GPIO_Init(void);
-static void MX_ADC1_Init(void);
-static void MX_ADC2_Init(void);
-static void MX_FDCAN1_Init(void);
-static void MX_SPI3_Init(void);
-static void MX_TIM2_Init(void);
 /* USER CODE BEGIN PFP */
 
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
+
+// For SWD debug port 0 printf()
+int _write(int file, char *ptr, int len)
+{
+	int i=0;
+	for(i=0; i<len; i++)
+		ITM_SendChar((*ptr++));
+	return len;
+}
 
 /* USER CODE END 0 */
 
@@ -79,7 +196,6 @@ static void MX_TIM2_Init(void);
 int main(void)
 {
   /* USER CODE BEGIN 1 */
-
   /* USER CODE END 1 */
 
   /* MCU Configuration--------------------------------------------------------*/
@@ -88,14 +204,12 @@ int main(void)
   HAL_Init();
 
   /* USER CODE BEGIN Init */
-
   /* USER CODE END Init */
 
   /* Configure the system clock */
   SystemClock_Config();
 
   /* USER CODE BEGIN SysInit */
-
   /* USER CODE END SysInit */
 
   /* Initialize all configured peripherals */
@@ -103,9 +217,66 @@ int main(void)
   MX_ADC1_Init();
   MX_ADC2_Init();
   MX_FDCAN1_Init();
-  MX_SPI3_Init();
+  MX_DMA_Init();
   MX_TIM2_Init();
+  MX_SPI3_Init();
   /* USER CODE BEGIN 2 */
+  printf("Actuator Firmware Version: %i\n",REV);
+
+  /* Start ADCs */
+  printf("Start ADC... ");
+  HAL_ADC_Start(&hadc1);
+  HAL_ADC_Start(&hadc2);
+  HAL_ADC_Start_DMA(&hadc1, (uint32_t*)adc.ADC1_DMA_Buff, 2);
+  HAL_ADC_Start_DMA(&hadc2, (uint32_t*)adc.ADC2_DMA_Buff, 2);
+  printf("Good\n");
+
+  /* Start Timers */
+  printf("Start TIM... ");
+  HAL_TIM_Base_Start_IT(&htim2);
+  HAL_TIM_PWM_Start(&htim2, Phase_A_Ch);
+  HAL_TIM_PWM_Start(&htim2, Phase_B_Ch);
+  HAL_TIM_PWM_Start(&htim2, Phase_C_Ch);
+  Set_PWM3(0,0,0);							// Set PWM channels to off
+  printf("Good\n");
+
+  /* Start Encoder */
+  printf("Start ENC... ");
+  HAL_GPIO_WritePin(SPI_CS_GPIO_Port, SPI_CS_Pin, 1);
+  // 		command1, 	command2,   data1,	    data2,      mask1,      mask2
+  ENC_Write(0b11010000, 0b01100000, 0b01000000, 0b00000001, 0b11000000, 0b00011111);		// write MOD_1	06 register
+  ENC_Write(0b11010000, 0b10000000, 0b00000000, 0b00000001, 0b00000000, 0b00000111);		// write MOD_2	08 register
+  ENC_Write(0b11010000, 0b10010000, 0b00000000, 0b00000000, 0b00000000, 0b00001111);		// write MOD_3  09 register
+  ENC_Write(0b11010000, 0b11100000, 0b00000000, 0b10000000, 0b00000000, 0b10011011);		// write MOD_4	0E register
+
+  ENC_Read_Ang(&enc.SPI_theta);
+  enc.IIF_Counter = (int)(enc.SPI_theta /360.0f * 4095.0f);	// Zero encoder
+  printf("Good\n");
+
+  /* Start CAN */
+  printf("Start CAN... ");
+  // can code
+  printf("Good\n");
+
+  /* Setup ADC structure */
+  adc.VDDA = 3.30f;
+  adc.V_bat_R_Top = 255.0f;
+  adc.V_bat_R_Bot = 10.0f;
+  adc.Temp_V_Offset = 0.424f;
+  adc.Temp_Slope = 0.00625f;
+  adc.R_Shunt_Res = 0.001f;
+  adc.SO_Gain = 40.0f;
+
+  /* Setup FOC structure*/
+  foc.Pole_Pairs = 21.0f;
+  foc.dt = (float)(2.0f/(170.0f*1000000.0f/(htim2.Init.Period+1)/(htim2.Init.RepetitionCounter+1)));
+  foc.PWM_Reg_Max = htim2.Init.Period;
+  foc.RCR   = 0;
+  foc.RCR_n = 13;	  // 5=10kHz, 7=8kHz, 13=5kHz	freq=32.5(RCR_n)^-0.724
+
+  /* Setup Filter structure */
+  fil.i_k[0]    = 0.421f;	fil.i_k[1]    = 0.158f;
+  fil.Misc_k[0] = 0.421f;	fil.Misc_k[1] = 0.158f;
 
   /* USER CODE END 2 */
 
@@ -113,9 +284,8 @@ int main(void)
   /* USER CODE BEGIN WHILE */
   while (1)
   {
-	  count++;
-	  HAL_GPIO_TogglePin(LED_Y_GPIO_Port, LED_Y_Pin);
-	  HAL_GPIO_TogglePin(LED_G_GPIO_Port, LED_G_Pin);
+	  HAL_Delay(100);
+
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
@@ -166,318 +336,294 @@ void SystemClock_Config(void)
   }
 }
 
-/**
-  * @brief ADC1 Initialization Function
-  * @param None
-  * @retval None
-  */
-static void MX_ADC1_Init(void)
-{
-
-  /* USER CODE BEGIN ADC1_Init 0 */
-
-  /* USER CODE END ADC1_Init 0 */
-
-  ADC_MultiModeTypeDef multimode = {0};
-  ADC_ChannelConfTypeDef sConfig = {0};
-
-  /* USER CODE BEGIN ADC1_Init 1 */
-
-  /* USER CODE END ADC1_Init 1 */
-  /** Common config
-  */
-  hadc1.Instance = ADC1;
-  hadc1.Init.ClockPrescaler = ADC_CLOCK_SYNC_PCLK_DIV4;
-  hadc1.Init.Resolution = ADC_RESOLUTION_12B;
-  hadc1.Init.DataAlign = ADC_DATAALIGN_RIGHT;
-  hadc1.Init.GainCompensation = 0;
-  hadc1.Init.ScanConvMode = ADC_SCAN_DISABLE;
-  hadc1.Init.EOCSelection = ADC_EOC_SINGLE_CONV;
-  hadc1.Init.LowPowerAutoWait = DISABLE;
-  hadc1.Init.ContinuousConvMode = DISABLE;
-  hadc1.Init.NbrOfConversion = 1;
-  hadc1.Init.DiscontinuousConvMode = DISABLE;
-  hadc1.Init.ExternalTrigConv = ADC_SOFTWARE_START;
-  hadc1.Init.ExternalTrigConvEdge = ADC_EXTERNALTRIGCONVEDGE_NONE;
-  hadc1.Init.DMAContinuousRequests = DISABLE;
-  hadc1.Init.Overrun = ADC_OVR_DATA_PRESERVED;
-  hadc1.Init.OversamplingMode = DISABLE;
-  if (HAL_ADC_Init(&hadc1) != HAL_OK)
-  {
-    Error_Handler();
-  }
-  /** Configure the ADC multi-mode
-  */
-  multimode.Mode = ADC_MODE_INDEPENDENT;
-  if (HAL_ADCEx_MultiModeConfigChannel(&hadc1, &multimode) != HAL_OK)
-  {
-    Error_Handler();
-  }
-  /** Configure Regular Channel
-  */
-  sConfig.Channel = ADC_CHANNEL_12;
-  sConfig.Rank = ADC_REGULAR_RANK_1;
-  sConfig.SamplingTime = ADC_SAMPLETIME_2CYCLES_5;
-  sConfig.SingleDiff = ADC_SINGLE_ENDED;
-  sConfig.OffsetNumber = ADC_OFFSET_NONE;
-  sConfig.Offset = 0;
-  if (HAL_ADC_ConfigChannel(&hadc1, &sConfig) != HAL_OK)
-  {
-    Error_Handler();
-  }
-  /* USER CODE BEGIN ADC1_Init 2 */
-
-  /* USER CODE END ADC1_Init 2 */
-
-}
-
-/**
-  * @brief ADC2 Initialization Function
-  * @param None
-  * @retval None
-  */
-static void MX_ADC2_Init(void)
-{
-
-  /* USER CODE BEGIN ADC2_Init 0 */
-
-  /* USER CODE END ADC2_Init 0 */
-
-  ADC_ChannelConfTypeDef sConfig = {0};
-
-  /* USER CODE BEGIN ADC2_Init 1 */
-
-  /* USER CODE END ADC2_Init 1 */
-  /** Common config
-  */
-  hadc2.Instance = ADC2;
-  hadc2.Init.ClockPrescaler = ADC_CLOCK_SYNC_PCLK_DIV4;
-  hadc2.Init.Resolution = ADC_RESOLUTION_12B;
-  hadc2.Init.DataAlign = ADC_DATAALIGN_RIGHT;
-  hadc2.Init.GainCompensation = 0;
-  hadc2.Init.ScanConvMode = ADC_SCAN_DISABLE;
-  hadc2.Init.EOCSelection = ADC_EOC_SINGLE_CONV;
-  hadc2.Init.LowPowerAutoWait = DISABLE;
-  hadc2.Init.ContinuousConvMode = DISABLE;
-  hadc2.Init.NbrOfConversion = 1;
-  hadc2.Init.DiscontinuousConvMode = DISABLE;
-  hadc2.Init.ExternalTrigConv = ADC_SOFTWARE_START;
-  hadc2.Init.ExternalTrigConvEdge = ADC_EXTERNALTRIGCONVEDGE_NONE;
-  hadc2.Init.DMAContinuousRequests = DISABLE;
-  hadc2.Init.Overrun = ADC_OVR_DATA_PRESERVED;
-  hadc2.Init.OversamplingMode = DISABLE;
-  if (HAL_ADC_Init(&hadc2) != HAL_OK)
-  {
-    Error_Handler();
-  }
-  /** Configure Regular Channel
-  */
-  sConfig.Channel = ADC_CHANNEL_12;
-  sConfig.Rank = ADC_REGULAR_RANK_1;
-  sConfig.SamplingTime = ADC_SAMPLETIME_2CYCLES_5;
-  sConfig.SingleDiff = ADC_SINGLE_ENDED;
-  sConfig.OffsetNumber = ADC_OFFSET_NONE;
-  sConfig.Offset = 0;
-  if (HAL_ADC_ConfigChannel(&hadc2, &sConfig) != HAL_OK)
-  {
-    Error_Handler();
-  }
-  /* USER CODE BEGIN ADC2_Init 2 */
-
-  /* USER CODE END ADC2_Init 2 */
-
-}
-
-/**
-  * @brief FDCAN1 Initialization Function
-  * @param None
-  * @retval None
-  */
-static void MX_FDCAN1_Init(void)
-{
-
-  /* USER CODE BEGIN FDCAN1_Init 0 */
-
-  /* USER CODE END FDCAN1_Init 0 */
-
-  /* USER CODE BEGIN FDCAN1_Init 1 */
-
-  /* USER CODE END FDCAN1_Init 1 */
-  hfdcan1.Instance = FDCAN1;
-  hfdcan1.Init.ClockDivider = FDCAN_CLOCK_DIV1;
-  hfdcan1.Init.FrameFormat = FDCAN_FRAME_CLASSIC;
-  hfdcan1.Init.Mode = FDCAN_MODE_NORMAL;
-  hfdcan1.Init.AutoRetransmission = DISABLE;
-  hfdcan1.Init.TransmitPause = DISABLE;
-  hfdcan1.Init.ProtocolException = DISABLE;
-  hfdcan1.Init.NominalPrescaler = 1;
-  hfdcan1.Init.NominalSyncJumpWidth = 1;
-  hfdcan1.Init.NominalTimeSeg1 = 2;
-  hfdcan1.Init.NominalTimeSeg2 = 2;
-  hfdcan1.Init.DataPrescaler = 1;
-  hfdcan1.Init.DataSyncJumpWidth = 1;
-  hfdcan1.Init.DataTimeSeg1 = 1;
-  hfdcan1.Init.DataTimeSeg2 = 1;
-  hfdcan1.Init.StdFiltersNbr = 0;
-  hfdcan1.Init.ExtFiltersNbr = 0;
-  hfdcan1.Init.TxFifoQueueMode = FDCAN_TX_FIFO_OPERATION;
-  if (HAL_FDCAN_Init(&hfdcan1) != HAL_OK)
-  {
-    Error_Handler();
-  }
-  /* USER CODE BEGIN FDCAN1_Init 2 */
-
-  /* USER CODE END FDCAN1_Init 2 */
-
-}
-
-/**
-  * @brief SPI3 Initialization Function
-  * @param None
-  * @retval None
-  */
-static void MX_SPI3_Init(void)
-{
-
-  /* USER CODE BEGIN SPI3_Init 0 */
-
-  /* USER CODE END SPI3_Init 0 */
-
-  /* USER CODE BEGIN SPI3_Init 1 */
-
-  /* USER CODE END SPI3_Init 1 */
-  /* SPI3 parameter configuration*/
-  hspi3.Instance = SPI3;
-  hspi3.Init.Mode = SPI_MODE_MASTER;
-  hspi3.Init.Direction = SPI_DIRECTION_1LINE;
-  hspi3.Init.DataSize = SPI_DATASIZE_4BIT;
-  hspi3.Init.CLKPolarity = SPI_POLARITY_LOW;
-  hspi3.Init.CLKPhase = SPI_PHASE_1EDGE;
-  hspi3.Init.NSS = SPI_NSS_HARD_OUTPUT;
-  hspi3.Init.BaudRatePrescaler = SPI_BAUDRATEPRESCALER_16;
-  hspi3.Init.FirstBit = SPI_FIRSTBIT_MSB;
-  hspi3.Init.TIMode = SPI_TIMODE_DISABLE;
-  hspi3.Init.CRCCalculation = SPI_CRCCALCULATION_DISABLE;
-  hspi3.Init.CRCPolynomial = 7;
-  hspi3.Init.CRCLength = SPI_CRC_LENGTH_DATASIZE;
-  hspi3.Init.NSSPMode = SPI_NSS_PULSE_ENABLE;
-  if (HAL_SPI_Init(&hspi3) != HAL_OK)
-  {
-    Error_Handler();
-  }
-  /* USER CODE BEGIN SPI3_Init 2 */
-
-  /* USER CODE END SPI3_Init 2 */
-
-}
-
-/**
-  * @brief TIM2 Initialization Function
-  * @param None
-  * @retval None
-  */
-static void MX_TIM2_Init(void)
-{
-
-  /* USER CODE BEGIN TIM2_Init 0 */
-
-  /* USER CODE END TIM2_Init 0 */
-
-  TIM_ClockConfigTypeDef sClockSourceConfig = {0};
-  TIM_MasterConfigTypeDef sMasterConfig = {0};
-  TIM_OC_InitTypeDef sConfigOC = {0};
-
-  /* USER CODE BEGIN TIM2_Init 1 */
-
-  /* USER CODE END TIM2_Init 1 */
-  htim2.Instance = TIM2;
-  htim2.Init.Prescaler = 0;
-  htim2.Init.CounterMode = TIM_COUNTERMODE_CENTERALIGNED1;
-  htim2.Init.Period = 4.294967295E9;
-  htim2.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
-  htim2.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
-  if (HAL_TIM_Base_Init(&htim2) != HAL_OK)
-  {
-    Error_Handler();
-  }
-  sClockSourceConfig.ClockSource = TIM_CLOCKSOURCE_INTERNAL;
-  if (HAL_TIM_ConfigClockSource(&htim2, &sClockSourceConfig) != HAL_OK)
-  {
-    Error_Handler();
-  }
-  if (HAL_TIM_PWM_Init(&htim2) != HAL_OK)
-  {
-    Error_Handler();
-  }
-  sMasterConfig.MasterOutputTrigger = TIM_TRGO_RESET;
-  sMasterConfig.MasterSlaveMode = TIM_MASTERSLAVEMODE_DISABLE;
-  if (HAL_TIMEx_MasterConfigSynchronization(&htim2, &sMasterConfig) != HAL_OK)
-  {
-    Error_Handler();
-  }
-  sConfigOC.OCMode = TIM_OCMODE_PWM1;
-  sConfigOC.Pulse = 0;
-  sConfigOC.OCPolarity = TIM_OCPOLARITY_HIGH;
-  sConfigOC.OCFastMode = TIM_OCFAST_DISABLE;
-  if (HAL_TIM_PWM_ConfigChannel(&htim2, &sConfigOC, TIM_CHANNEL_1) != HAL_OK)
-  {
-    Error_Handler();
-  }
-  if (HAL_TIM_PWM_ConfigChannel(&htim2, &sConfigOC, TIM_CHANNEL_3) != HAL_OK)
-  {
-    Error_Handler();
-  }
-  if (HAL_TIM_PWM_ConfigChannel(&htim2, &sConfigOC, TIM_CHANNEL_4) != HAL_OK)
-  {
-    Error_Handler();
-  }
-  /* USER CODE BEGIN TIM2_Init 2 */
-
-  /* USER CODE END TIM2_Init 2 */
-  HAL_TIM_MspPostInit(&htim2);
-
-}
-
-/**
-  * @brief GPIO Initialization Function
-  * @param None
-  * @retval None
-  */
-static void MX_GPIO_Init(void)
-{
-  GPIO_InitTypeDef GPIO_InitStruct = {0};
-
-  /* GPIO Ports Clock Enable */
-  __HAL_RCC_GPIOF_CLK_ENABLE();
-  __HAL_RCC_GPIOA_CLK_ENABLE();
-  __HAL_RCC_GPIOB_CLK_ENABLE();
-  __HAL_RCC_GPIOC_CLK_ENABLE();
-
-  /*Configure GPIO pin Output Level */
-  HAL_GPIO_WritePin(GPIOB, LED_Y_Pin|LED_G_Pin, GPIO_PIN_RESET);
-
-  /*Configure GPIO pin : IF_A_Pin */
-  GPIO_InitStruct.Pin = IF_A_Pin;
-  GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
-  GPIO_InitStruct.Pull = GPIO_NOPULL;
-  HAL_GPIO_Init(IF_A_GPIO_Port, &GPIO_InitStruct);
-
-  /*Configure GPIO pin : IF_B_Pin */
-  GPIO_InitStruct.Pin = IF_B_Pin;
-  GPIO_InitStruct.Mode = GPIO_MODE_IT_RISING;
-  GPIO_InitStruct.Pull = GPIO_NOPULL;
-  HAL_GPIO_Init(IF_B_GPIO_Port, &GPIO_InitStruct);
-
-  /*Configure GPIO pins : LED_Y_Pin LED_G_Pin */
-  GPIO_InitStruct.Pin = LED_Y_Pin|LED_G_Pin;
-  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
-  GPIO_InitStruct.Pull = GPIO_NOPULL;
-  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
-  HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
-
-}
-
 /* USER CODE BEGIN 4 */
+
+// Read ADCs
+void  ADC_Get_Raw    (int16_t*i_a_Raw, int16_t*i_b_Raw, int16_t*PVDD_Raw, int16_t*Temp_Raw)
+{
+	HAL_ADC_PollForConversion(&hadc1, 1);
+
+	*i_a_Raw	= HAL_ADC_GetValue(&hadc1);
+	*i_b_Raw	= HAL_ADC_GetValue(&hadc2);
+	*PVDD_Raw	= adc.ADC1_DMA_Buff[0];
+	*Temp_Raw	= adc.ADC2_DMA_Buff[0];
+}
+void  ADC_Filter_Curr(int16_t i_a_Raw, int16_t i_b_Raw, int16_t*i_a_Fil, int16_t*i_b_Fil)
+{
+	// Filter
+	*i_a_Fil = fil.i_k[0]*i_a_Raw + fil.i_k[0]*fil.i_a_Pre + fil.i_k[1]*fil.i_a_Pre_Fil;
+	*i_b_Fil = fil.i_k[0]*i_b_Raw + fil.i_k[0]*fil.i_b_Pre + fil.i_k[1]*fil.i_b_Pre_Fil;
+
+	// Now store current values as previous values
+	fil.i_a_Pre = i_a_Raw;
+	fil.i_b_Pre = i_b_Raw;
+
+	fil.i_a_Pre_Fil = *i_a_Fil;
+	fil.i_b_Pre_Fil = *i_b_Fil;
+}
+void  ADC_Norm_Curr  (int16_t i_a_Fil, int16_t i_b_Fil, float*i_a, float*i_b)
+{
+	*i_a = (((float)(i_a_Fil-adc.SO_A_Offset))*adc.VDDA/4095.0f)/adc.SO_Gain/adc.R_Shunt_Res;
+	*i_b = (((float)(i_b_Fil-adc.SO_B_Offset))*adc.VDDA/4095.0f)/adc.SO_Gain/adc.R_Shunt_Res;
+}
+void  ADC_Filter_Misc(int16_t PVDD_Raw, int16_t Temp_Raw, int16_t*PVDD_Fil, int16_t*Temp_Fil)
+{
+	// Filter
+	*PVDD_Fil = fil.Misc_k[0]*PVDD_Raw + fil.Misc_k[0]*fil.PVDD_Pre + fil.Misc_k[1]*fil.PVDD_Pre_Fil;
+	*Temp_Fil = fil.Misc_k[0]*Temp_Raw + fil.Misc_k[0]*fil.Temp_Pre + fil.Misc_k[1]*fil.Temp_Pre_Fil;
+
+	// Now store current values as previous values
+	fil.PVDD_Pre = PVDD_Raw;
+	fil.Temp_Pre = Temp_Raw;
+
+	fil.PVDD_Pre_Fil = *PVDD_Fil;
+	fil.Temp_Pre_Fil = *Temp_Fil;
+}
+void  ADC_Norm_Misc  (int16_t PVDD_Fil, int16_t Temp_Fil, float*PVDD, float*Temp)
+{
+	*PVDD = (float)PVDD_Fil*adc.VDDA/4095.0f / adc.V_bat_R_Bot * (adc.V_bat_R_Bot+adc.V_bat_R_Top);
+	*Temp = (((float)Temp_Fil*adc.VDDA/4095.0f)-adc.Temp_V_Offset)/adc.Temp_Slope;
+}
+// Encoder
+void  ENC_Read_Ang(float*Angle)
+{
+	uint8_t ENC_ASK_POS   [2] = {0b10000000,0b00100001};	// Command for asking position
+	uint8_t SPI_BUFF[2] = {0,0};
+
+	HAL_GPIO_WritePin(SPI_CS_GPIO_Port, SPI_CS_Pin, 0);
+	HAL_SPI_Transmit(&hspi3, (uint8_t*)&ENC_ASK_POS, 2, 10);	// Ask for data
+	HAL_SPI_Receive (&hspi3, (uint8_t*)SPI_BUFF    , 2, 10);	// Receive 4 bytes of data
+	HAL_GPIO_WritePin(SPI_CS_GPIO_Port, SPI_CS_Pin, 1);
+
+	int16_t SPI_ANG = (SPI_BUFF[0] << 8 | SPI_BUFF[1]);			// make 16 bit
+	int16_t ANG_VAL = (0b0011111111111111 & SPI_ANG);					// keep last 14 bits
+	ANG_VAL -= (((SPI_ANG)&(1UL<<(14)))>>(14))*(-16384);
+	*Angle = 360.0f/32768.0f * ANG_VAL;
+}
+void  ENC_Read_Vel(float*Velocity)
+{
+	uint8_t ENC_ASK_VEL   [2] = {0b10000000,0b00110000};	// Command for asking velocity
+	uint8_t SPI_BUFF[2] = {0,0};
+
+	HAL_GPIO_WritePin(SPI_CS_GPIO_Port, SPI_CS_Pin, 0);
+	HAL_SPI_Transmit(&hspi3, (uint8_t*)&ENC_ASK_VEL, 2, 10);	// Ask for data
+	HAL_SPI_Receive (&hspi3, (uint8_t*)SPI_BUFF    , 2, 10);	// Receive 2 bytes of data
+	HAL_GPIO_WritePin(SPI_CS_GPIO_Port, SPI_CS_Pin, 1);
+
+	int16_t SPI_VEL = (SPI_BUFF[0] << 8 | SPI_BUFF[1]);			// make 16 bit
+	int16_t VEL_VAL = (0b0011111111111111 & SPI_VEL);			// keep last 14 bits
+	*Velocity = 360.0f/32768.0f * VEL_VAL / 2.0f / 0.0000427f;
+}
+void  ENC_Write(uint8_t com1, uint8_t com2, uint8_t data1, uint8_t data2, uint8_t mask1, uint8_t mask2)
+{
+	// read
+	uint8_t ENC_R_COM [2] = {com1,com2};						// Command for reading
+	uint8_t SPI_BUFF[2] = {0,0};
+
+	HAL_GPIO_WritePin(SPI_CS_GPIO_Port, SPI_CS_Pin, 0);
+	HAL_SPI_Transmit(&hspi3, (uint8_t*)&ENC_R_COM, 2, 10);		// Read current register
+	HAL_SPI_Receive (&hspi3, (uint8_t*)SPI_BUFF, 2, 10);
+	HAL_GPIO_WritePin(SPI_CS_GPIO_Port, SPI_CS_Pin, 1);
+
+	// form command
+	uint8_t ENC_W_EOM [4] = {com1|0b1000000,								// make into write command from read
+						     com2,											// same
+							 (SPI_BUFF[0] & (~mask1)) | (data1 & mask1),	// keep read when mask=0, keep data when mask=1
+							 (SPI_BUFF[1] & (~mask2)) | (data2 & mask2)};	// keep read when mask=0, keep data when mask=1
+	SPI_BUFF[0] = 0;
+	SPI_BUFF[1] = 0;
+	HAL_GPIO_WritePin(SPI_CS_GPIO_Port, SPI_CS_Pin, 0);
+	HAL_SPI_Transmit(&hspi3, (uint8_t*)&ENC_W_EOM, 4, 10);		// Write to register
+	HAL_SPI_Receive (&hspi3, (uint8_t*)SPI_BUFF, 2, 10);
+	HAL_GPIO_WritePin(SPI_CS_GPIO_Port, SPI_CS_Pin, 1);
+
+	// check safety word
+	uint16_t SAFE_WORD = (SPI_BUFF[0] << 8 | SPI_BUFF[1]);		// form 16bit safety word
+
+	uint8_t ERR_1 =  SAFE_WORD       >> 15;		// only care about first bit
+	uint8_t ERR_2 = (SAFE_WORD << 1) >> 15;		// shift left one then make it first
+	uint8_t ERR_3 = (SAFE_WORD << 2) >> 15;		// shift left 2 ...
+	uint8_t ERR_4 = (SAFE_WORD << 3) >> 15;		// ...
+
+	if(ERR_1==0 || ERR_2==0 || ERR_3==0 || ERR_4==0)
+	{
+		if(ERR_1==0){ if(PRINT){printf("Encoder: reset/watchdog overflow!\n");}}
+		if(ERR_1==0){ if(PRINT){printf("Encoder: system error!\n");}}
+		if(ERR_1==0){ if(PRINT){printf("Encoder: interface access error!\n");}}
+		if(ERR_1==0){ if(PRINT){printf("Encoder: invalid angle value!\n");}}
+		Error_Handler();
+	}
+}
+void  IF_B_Int(void)
+{
+	if(HAL_GPIO_ReadPin(IF_A_GPIO_Port, IF_A_Pin))
+		enc.IIF_Counter++;		// If high, increment
+	else
+		enc.IIF_Counter--;		// If low , decrement
+
+	if(enc.IIF_Counter>=4096)	// If overflow
+	{
+		enc.IIF_Counter = 0;		// Set to 0
+		enc.IIF_Revolutions++;		// Increment revolutions counter
+	}
+
+	if(enc.IIF_Counter<0)		// If underflow
+	{
+		enc.IIF_Counter = 4095;		// Set to 4095
+		enc.IIF_Revolutions--;		// Decrement revolutions counter
+	}
+}
+// FOC stuff
+void  Set_PWM3(float DC_1, float DC_2, float DC_3)
+{
+	__HAL_TIM_SET_COMPARE(&htim2,Phase_A_Ch,foc.PWM_Reg_Max*DC_1);	// Set PWM channels
+	__HAL_TIM_SET_COMPARE(&htim2,Phase_B_Ch,foc.PWM_Reg_Max*DC_2);
+	__HAL_TIM_SET_COMPARE(&htim2,Phase_C_Ch,foc.PWM_Reg_Max*DC_3);
+}
+float _sin(float theta)
+{
+	return sin_lookup[(int)floor(theta)];
+}
+float _cos(float theta)
+{
+	return sin_lookup[(int)floor(fmodf(theta+270.0f,360.0f))];
+}
+// Timer Interrupts
+void  FOC_Interrupt(void)
+{
+	/* Check if skipping this PWM pulse */
+	foc.RCR++;									// increment
+	if(foc.RCR==foc.RCR_n+2){foc.RCR=0;}		// overflow
+
+	if(foc.RCR==foc.RCR_n)
+	{
+		/* LED on */
+		HAL_GPIO_WritePin(LED_Y_GPIO_Port, LED_Y_Pin, 1);
+
+		/* FOC sample */
+		ADC_Get_Raw(&adc.i_a_Raw,&adc.i_b_Raw, &adc.PVDD_Raw, &adc.Temp_Raw);	// Read raw ADC
+		enc.IIF_Raw = enc.IIF_Counter;											// Get encoder angle
+
+		/* Filter and normalise readings */
+		ADC_Filter_Curr(adc.i_a_Raw,adc.i_b_Raw,&adc.i_a_Fil,&adc.i_b_Fil);		// Filter raw ADC currents
+		ADC_Norm_Curr  (adc.i_a_Fil,adc.i_b_Fil,&foc.i_a,&foc.i_b);				// Normalise currents
+		foc.m_theta = (float)enc.IIF_Raw / 4095.0f * 360.0f;					// Normalise angle to 0-360deg
+
+		/* FOC maths */
+		// Get electrical angles correct
+		foc.e_theta = fmodf(foc.m_theta*foc.Pole_Pairs,360.0f);	// get electrical angle and constrain in 360 deg
+
+		// Clarke -> alpha/beta
+		foc.i_alph = foc.i_a;
+		foc.i_beta = SQRT1_3 * (2.0f*foc.i_b - foc.i_a);
+
+		// Park -> direct/quadrature
+		float sin_Ang = _sin(foc.e_theta);
+		float cos_Ang = _cos(foc.e_theta);
+		foc.i_d = cos_Ang*foc.i_alph + sin_Ang*foc.i_beta;
+		foc.i_q = cos_Ang*foc.i_beta - sin_Ang*foc.i_alph;
+
+		/* Regulate currents */
+		foc.DC_I = 0.1f;				// Current duty cycle
+
+		/* Set PWM Compare values */
+		foc.alpha = fmodf(foc.e_theta,60.0f);	// calculate alpha
+
+		foc.DC_1 = foc.DC_I*_sin(60.0f - foc.alpha);
+		foc.DC_2 = foc.DC_I*_sin(foc.alpha);
+		foc.DC_0 = 1.0f - foc.DC_1 - foc.DC_2;
+
+		foc.sector = (int)floor(foc.e_theta/60.0f);
+
+		switch (foc.sector)
+		{
+			case 0:
+				foc.PWM_A = 0.5*foc.DC_0;
+				foc.PWM_B = 0.5*foc.DC_0 + foc.DC_1;
+				foc.PWM_C = 0.5*foc.DC_0 + foc.DC_1 + foc.DC_2;
+				break;
+			case 1:
+				foc.PWM_A = 0.5*foc.DC_0 + foc.DC_2;
+				foc.PWM_B = 0.5*foc.DC_0;
+				foc.PWM_C = 0.5*foc.DC_0 + foc.DC_1 + foc.DC_2;
+				break;
+			case 2:
+				foc.PWM_A = 0.5*foc.DC_0 + foc.DC_1 + foc.DC_2;
+				foc.PWM_B = 0.5*foc.DC_0;
+				foc.PWM_C = 0.5*foc.DC_0 + foc.DC_1;
+				break;
+			case 3:
+				foc.PWM_A = 0.5*foc.DC_0 + foc.DC_1 + foc.DC_2;
+				foc.PWM_B = 0.5*foc.DC_0 + foc.DC_2;
+				foc.PWM_C = 0.5*foc.DC_0;
+				break;
+			case 4:
+				foc.PWM_A = 0.5*foc.DC_0 + foc.DC_1;
+				foc.PWM_B = 0.5*foc.DC_0 + foc.DC_1 + foc.DC_2;
+				foc.PWM_C = 0.5*foc.DC_0;
+				break;
+			case 5:
+				foc.PWM_A = 0.5*foc.DC_0;
+				foc.PWM_B = 0.5*foc.DC_0 + foc.DC_1 + foc.DC_2;
+				foc.PWM_C = 0.5*foc.DC_0 + foc.DC_2;
+				break;
+		}
+
+		//	Set_PWM3(foc.PWM_A,foc.PWM_B,foc.PWM_C);
+
+		Set_PWM3(0.25f,0.5f,0.75f);
+
+		/* LED off */
+		HAL_GPIO_WritePin(LED_Y_GPIO_Port, LED_Y_Pin, 0);
+	}
+
+}
+void  CAN_Interrupt(void)
+{
+//	// Get CAN message
+//		// 4b  Unused
+//		// 12b Position
+//		// 16b Velocity
+//		// 16b Torque
+//	HAL_CAN_GetRxMessage(&hcan1, CAN_RX_FIFO0, &can.rx_header, can.rx_data);
+//
+//	// Create CAN response message
+//		// 8b  temp
+//		// 12b position
+//		// 14b velocity
+//		// 14b torque
+//	uint32_t TxMailbox;
+//	uint16_t temp_vel = 0b0011111111111111;
+//	uint16_t temp_tor = 0b0011111111111111;
+//
+//	can.tx_data[0] = (uint8_t) (((float)adc.Temp_Fil*adc.VDDA/4095.0f)-adc.Temp_V_Offset)/adc.Temp_Slope;
+//	can.tx_data[1] = (uint8_t) (enc.IIF_Raw>>4);
+//	can.tx_data[2] = (uint8_t) ((enc.IIF_Raw<<4) | ((temp_vel>>10) & 0b00001111));
+//	can.tx_data[3] = (uint8_t) (temp_vel>>2);
+//	can.tx_data[4] = (uint8_t) ((temp_vel<<6) | ((temp_tor>>8) & 0b00001111));
+//	can.tx_data[5] = (uint8_t) (temp_tor);
+//
+//	// Send CAN message
+//	HAL_CAN_AddTxMessage(&hcan1, &can.tx_header, can.tx_data, &TxMailbox);
+//
+//	// if special commands, do function else unpack rx message
+//	if((can.rx_data[0]==0xFF) & (can.rx_data[1]==0xFF) & (can.rx_data[2]==0xFF) & (can.rx_data[3]==0xFF) & (can.rx_data[4]==0xFF))
+//	{
+//		switch (can.rx_data[5])
+//		{
+//		case 0:
+//			break;
+//		case 1:
+//			break;
+//		}
+//	}
+//	else
+//	{
+//		// unpack and update target values
+//	}
+//
+//	can.timeout = 0;	// reset timeout timer
+}
 
 /* USER CODE END 4 */
 
