@@ -71,7 +71,7 @@ void  ADC_Norm_Misc  (int16_t PVDD_Fil, int16_t Temp_Fil, float*PVDD, float*Temp
 void  ENC_Read_Ang(float*Angle);				// ask for encoder angle over SPI
 void  ENC_Read_Vel(float*Velocity);				// ask for encoder velocity over SPI
 void  ENC_Write(uint8_t com1, uint8_t com2, uint8_t data1, uint8_t data2, uint8_t mask1, uint8_t mask2);
-void  IF_B_Int(void);									// Phase B interrupt for encoder
+void  ENC_Interrupt(GPIO_TypeDef *GPIOx, uint16_t GPIO_Pin);
 void  ENC_Filter (int16_t IIF_Raw, uint32_t dIIF_Raw, int16_t*IIF_Fil, uint32_t*dIIF_Fil);	// Filter
 void  ENC_Norm   (int16_t IIF_Fil, uint32_t dIIF_Fil, float*theta, float*dtheta);			// Normalise encoder values
 // FOC stuff
@@ -97,9 +97,9 @@ void  CAN_Interrupt(void);		// CAN RX interrupt
 #define PWM_A_GPIO_Port GPIOA
 #define IF_A_Pin GPIO_PIN_5
 #define IF_A_GPIO_Port GPIOA
+#define IF_A_EXTI_IRQn EXTI9_5_IRQn
 #define IF_B_Pin GPIO_PIN_6
 #define IF_B_GPIO_Port GPIOA
-#define IF_B_EXTI_IRQn EXTI9_5_IRQn
 #define T_Sen_Pin GPIO_PIN_7
 #define T_Sen_GPIO_Port GPIOA
 #define V_Sen_Pin GPIO_PIN_0

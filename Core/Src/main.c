@@ -53,6 +53,16 @@
 #define CAN_TX_ID 2		// Transmits as this ID
 #define CAN_RX_ID 1		// Receives messages from this ID
 
+#define BYTE_TO_BINARY(byte)  \
+  (byte & 0x80 ? '1' : '0'), \
+  (byte & 0x40 ? '1' : '0'), \
+  (byte & 0x20 ? '1' : '0'), \
+  (byte & 0x10 ? '1' : '0'), \
+  (byte & 0x08 ? '1' : '0'), \
+  (byte & 0x04 ? '1' : '0'), \
+  (byte & 0x02 ? '1' : '0'), \
+  (byte & 0x01 ? '1' : '0')
+
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -66,8 +76,6 @@
 // Encoder
 typedef struct
 {
-	uint8_t	SPI_Buffer[4];		// Buffer for SPI
-
 	float SPI_theta;			// IIF from SPI 0-360deg used to zero
 
 	int16_t  IIF_Counter;		// The counter variable that is interrupt driven so dont use it in calculations
@@ -241,13 +249,24 @@ int main(void)
   printf("Good\n");
 
   /* Start Encoder */
-  printf("Start ENC... ");
+  printf("Start ENC... \n");
   HAL_GPIO_WritePin(SPI_CS_GPIO_Port, SPI_CS_Pin, 1);
+
+
+  // command is
+  // 15 	- 0 write/1 read
+  // 14-11	- lock				0000 default	1010 for 0x05h-0x11h
+  // 10		- 0 access to current values/1 access all in buffer
+  // 9-4	- 6 bit address
+  // 3-0	- 4 bit number of data words	if 0000, no safety word
+
   // 		command1, 	command2,   data1,	    data2,      mask1,      mask2
-  ENC_Write(0b11010000, 0b01100000, 0b01000000, 0b00000001, 0b11000000, 0b00011111);		// write MOD_1	06 register
-  ENC_Write(0b11010000, 0b10000000, 0b00000000, 0b00000001, 0b00000000, 0b00000111);		// write MOD_2	08 register
-  ENC_Write(0b11010000, 0b10010000, 0b00000000, 0b00000000, 0b00000000, 0b00001111);		// write MOD_3  09 register
-  ENC_Write(0b11010000, 0b11100000, 0b00000000, 0b10000000, 0b00000000, 0b10011011);		// write MOD_4	0E register
+//  ENC_Write(0b11010000, 0b01100001, 0b01000000, 0b00000001, 0b11000000, 0b00010111);		// write MOD_1	06 register		A/B
+  ENC_Write(0b11010000, 0b01100001, 0b01000000, 0b00000010, 0b11000000, 0b00010111);		// write MOD_1	06 register		step/dir
+  ENC_Write(0b11010000, 0b10000001, 0b00001000, 0b00000001, 0b01111111, 0b11111111);		// write MOD_2	08 register
+  ENC_Write(0b11010000, 0b10010001, 0b00000000, 0b00000000, 0b11111111, 0b11111111);		// write MOD_3  09 register
+  ENC_Write(0b11010000, 0b11010001, 0b00000000, 0b00001001, 0b11111111, 0b11111111);		// write IFAB	0D register	(13)
+  ENC_Write(0b11010000, 0b11100001, 0b00000000, 0b10000000, 0b00000001, 0b11111011);		// write MOD_4	0E register (14)
 
   ENC_Read_Ang(&enc.SPI_theta);
   enc.IIF_Counter = (int)(enc.SPI_theta /360.0f * 4095.0f);	// Zero encoder
@@ -284,7 +303,6 @@ int main(void)
   /* USER CODE BEGIN WHILE */
   while (1)
   {
-	  HAL_Delay(100);
 
     /* USER CODE END WHILE */
 
@@ -416,62 +434,82 @@ void  ENC_Read_Vel(float*Velocity)
 }
 void  ENC_Write(uint8_t com1, uint8_t com2, uint8_t data1, uint8_t data2, uint8_t mask1, uint8_t mask2)
 {
+	uint8_t ADDR = (com2>>4)&0b00001111;
+	printf("\tRegister %i... ",ADDR);
+
 	// read
-	uint8_t ENC_R_COM [2] = {com1,com2};						// Command for reading
+	uint8_t ENC_R_COM [2] = {com1|0b1000000,								// make into read command
+							 com2};
 	uint8_t SPI_BUFF[2] = {0,0};
 
+	printf("\n");
+//	printf("\t\tTX: %c%c%c%c %c%c%c%c   %c%c%c%c %c%c%c%c\n", BYTE_TO_BINARY(ENC_R_COM[0]), BYTE_TO_BINARY(ENC_R_COM[1]));
 	HAL_GPIO_WritePin(SPI_CS_GPIO_Port, SPI_CS_Pin, 0);
 	HAL_SPI_Transmit(&hspi3, (uint8_t*)&ENC_R_COM, 2, 10);		// Read current register
 	HAL_SPI_Receive (&hspi3, (uint8_t*)SPI_BUFF, 2, 10);
 	HAL_GPIO_WritePin(SPI_CS_GPIO_Port, SPI_CS_Pin, 1);
+	printf("\t\tRead  : %c%c%c%c %c%c%c%c   %c%c%c%c %c%c%c%c\n", BYTE_TO_BINARY(SPI_BUFF[0]), BYTE_TO_BINARY(SPI_BUFF[1]));
 
-	// form command
-	uint8_t ENC_W_EOM [4] = {com1|0b1000000,								// make into write command from read
+	// write
+	uint8_t ENC_W_EOM [4] = {com1&0b01111111,								// make into write command
 						     com2,											// same
 							 (SPI_BUFF[0] & (~mask1)) | (data1 & mask1),	// keep read when mask=0, keep data when mask=1
 							 (SPI_BUFF[1] & (~mask2)) | (data2 & mask2)};	// keep read when mask=0, keep data when mask=1
-	SPI_BUFF[0] = 0;
-	SPI_BUFF[1] = 0;
+
+	printf("\t\tTX    : %c%c%c%c %c%c%c%c   %c%c%c%c %c%c%c%c   %c%c%c%c %c%c%c%c   %c%c%c%c %c%c%c%c\n", BYTE_TO_BINARY(ENC_W_EOM[0]), BYTE_TO_BINARY(ENC_W_EOM[1]), BYTE_TO_BINARY(ENC_W_EOM[2]), BYTE_TO_BINARY(ENC_W_EOM[3]));
 	HAL_GPIO_WritePin(SPI_CS_GPIO_Port, SPI_CS_Pin, 0);
 	HAL_SPI_Transmit(&hspi3, (uint8_t*)&ENC_W_EOM, 4, 10);		// Write to register
 	HAL_SPI_Receive (&hspi3, (uint8_t*)SPI_BUFF, 2, 10);
 	HAL_GPIO_WritePin(SPI_CS_GPIO_Port, SPI_CS_Pin, 1);
+	printf("\t\tS Word: %c%c%c%c %c%c%c%c   %c%c%c%c %c%c%c%c\n", BYTE_TO_BINARY(SPI_BUFF[0]), BYTE_TO_BINARY(SPI_BUFF[1]));
 
 	// check safety word
 	uint16_t SAFE_WORD = (SPI_BUFF[0] << 8 | SPI_BUFF[1]);		// form 16bit safety word
 
-	uint8_t ERR_1 =  SAFE_WORD       >> 15;		// only care about first bit
-	uint8_t ERR_2 = (SAFE_WORD << 1) >> 15;		// shift left one then make it first
-	uint8_t ERR_3 = (SAFE_WORD << 2) >> 15;		// shift left 2 ...
-	uint8_t ERR_4 = (SAFE_WORD << 3) >> 15;		// ...
+	uint8_t ERR_1 = (SAFE_WORD >> 15)&1U;		// only care about first bit
+	uint8_t ERR_2 = (SAFE_WORD >> 14)&1U;		// shift left one then make it first
+	uint8_t ERR_3 = (SAFE_WORD >> 13)&1U;		// shift left 2 ...
+	uint8_t ERR_4 = (SAFE_WORD >> 12)&1U;		// ...
 
 	if(ERR_1==0 || ERR_2==0 || ERR_3==0 || ERR_4==0)
 	{
-		if(ERR_1==0){ if(PRINT){printf("Encoder: reset/watchdog overflow!\n");}}
-		if(ERR_1==0){ if(PRINT){printf("Encoder: system error!\n");}}
-		if(ERR_1==0){ if(PRINT){printf("Encoder: interface access error!\n");}}
-		if(ERR_1==0){ if(PRINT){printf("Encoder: invalid angle value!\n");}}
+		if(ERR_1==0){printf("\t\t\tErr 1: Reset/watchdog overflow!\n");}
+		if(ERR_2==0){printf("\t\t\tErr 2: System error!\n");}
+		if(ERR_3==0){printf("\t\t\tErr 3: Interface access error!\n");}
+		if(ERR_4==0){printf("\t\t\tErr 4: Invalid angle value!\n");}
 		Error_Handler();
 	}
+
+	// check if written
+	HAL_GPIO_WritePin(SPI_CS_GPIO_Port, SPI_CS_Pin, 0);
+	HAL_SPI_Transmit(&hspi3, (uint8_t*)&ENC_R_COM, 2, 10);		// Read current register
+	HAL_SPI_Receive (&hspi3, (uint8_t*)SPI_BUFF, 2, 10);
+	HAL_GPIO_WritePin(SPI_CS_GPIO_Port, SPI_CS_Pin, 1);
+	printf("\t\tNew   : %c%c%c%c %c%c%c%c   %c%c%c%c %c%c%c%c\n", BYTE_TO_BINARY(SPI_BUFF[0]), BYTE_TO_BINARY(SPI_BUFF[1]));
+
+//	if((data1&mask1) == (SPI_BUFF[0]&mask1))
+//	{
+//		// first bit same
+//		printf("\t\tBit 1 good\n");
+//	}
+//	if((data2&mask2) == (SPI_BUFF[1]&mask2))
+//	{
+//		// second bit same
+//		printf("\t\tBit 2 good\n");
+//	}
 }
-void  IF_B_Int(void)
+void  ENC_Interrupt(GPIO_TypeDef *GPIOx, uint16_t GPIO_Pin)
 {
-	if(HAL_GPIO_ReadPin(IF_A_GPIO_Port, IF_A_Pin))
+	if(HAL_GPIO_ReadPin(GPIOx, GPIO_Pin))
 		enc.IIF_Counter++;		// If high, increment
 	else
 		enc.IIF_Counter--;		// If low , decrement
 
 	if(enc.IIF_Counter>=4096)	// If overflow
-	{
 		enc.IIF_Counter = 0;		// Set to 0
-		enc.IIF_Revolutions++;		// Increment revolutions counter
-	}
 
 	if(enc.IIF_Counter<0)		// If underflow
-	{
 		enc.IIF_Counter = 4095;		// Set to 4095
-		enc.IIF_Revolutions--;		// Decrement revolutions counter
-	}
 }
 // FOC stuff
 void  Set_PWM3(float DC_1, float DC_2, float DC_3)
@@ -510,66 +548,66 @@ void  FOC_Interrupt(void)
 		foc.m_theta = (float)enc.IIF_Raw / 4095.0f * 360.0f;					// Normalise angle to 0-360deg
 
 		/* FOC maths */
-		// Get electrical angles correct
-		foc.e_theta = fmodf(foc.m_theta*foc.Pole_Pairs,360.0f);	// get electrical angle and constrain in 360 deg
-
-		// Clarke -> alpha/beta
-		foc.i_alph = foc.i_a;
-		foc.i_beta = SQRT1_3 * (2.0f*foc.i_b - foc.i_a);
-
-		// Park -> direct/quadrature
-		float sin_Ang = _sin(foc.e_theta);
-		float cos_Ang = _cos(foc.e_theta);
-		foc.i_d = cos_Ang*foc.i_alph + sin_Ang*foc.i_beta;
-		foc.i_q = cos_Ang*foc.i_beta - sin_Ang*foc.i_alph;
-
-		/* Regulate currents */
-		foc.DC_I = 0.1f;				// Current duty cycle
-
-		/* Set PWM Compare values */
-		foc.alpha = fmodf(foc.e_theta,60.0f);	// calculate alpha
-
-		foc.DC_1 = foc.DC_I*_sin(60.0f - foc.alpha);
-		foc.DC_2 = foc.DC_I*_sin(foc.alpha);
-		foc.DC_0 = 1.0f - foc.DC_1 - foc.DC_2;
-
-		foc.sector = (int)floor(foc.e_theta/60.0f);
-
-		switch (foc.sector)
-		{
-			case 0:
-				foc.PWM_A = 0.5*foc.DC_0;
-				foc.PWM_B = 0.5*foc.DC_0 + foc.DC_1;
-				foc.PWM_C = 0.5*foc.DC_0 + foc.DC_1 + foc.DC_2;
-				break;
-			case 1:
-				foc.PWM_A = 0.5*foc.DC_0 + foc.DC_2;
-				foc.PWM_B = 0.5*foc.DC_0;
-				foc.PWM_C = 0.5*foc.DC_0 + foc.DC_1 + foc.DC_2;
-				break;
-			case 2:
-				foc.PWM_A = 0.5*foc.DC_0 + foc.DC_1 + foc.DC_2;
-				foc.PWM_B = 0.5*foc.DC_0;
-				foc.PWM_C = 0.5*foc.DC_0 + foc.DC_1;
-				break;
-			case 3:
-				foc.PWM_A = 0.5*foc.DC_0 + foc.DC_1 + foc.DC_2;
-				foc.PWM_B = 0.5*foc.DC_0 + foc.DC_2;
-				foc.PWM_C = 0.5*foc.DC_0;
-				break;
-			case 4:
-				foc.PWM_A = 0.5*foc.DC_0 + foc.DC_1;
-				foc.PWM_B = 0.5*foc.DC_0 + foc.DC_1 + foc.DC_2;
-				foc.PWM_C = 0.5*foc.DC_0;
-				break;
-			case 5:
-				foc.PWM_A = 0.5*foc.DC_0;
-				foc.PWM_B = 0.5*foc.DC_0 + foc.DC_1 + foc.DC_2;
-				foc.PWM_C = 0.5*foc.DC_0 + foc.DC_2;
-				break;
-		}
-
-		//	Set_PWM3(foc.PWM_A,foc.PWM_B,foc.PWM_C);
+//		// Get electrical angles correct
+//		foc.e_theta = fmodf(foc.m_theta*foc.Pole_Pairs,360.0f);	// get electrical angle and constrain in 360 deg
+//
+//		// Clarke -> alpha/beta
+//		foc.i_alph = foc.i_a;
+//		foc.i_beta = SQRT1_3 * (2.0f*foc.i_b - foc.i_a);
+//
+//		// Park -> direct/quadrature
+//		float sin_Ang = _sin(foc.e_theta);
+//		float cos_Ang = _cos(foc.e_theta);
+//		foc.i_d = cos_Ang*foc.i_alph + sin_Ang*foc.i_beta;
+//		foc.i_q = cos_Ang*foc.i_beta - sin_Ang*foc.i_alph;
+//
+//		/* Regulate currents */
+//		foc.DC_I = 0.1f;				// Current duty cycle
+//
+//		/* Set PWM Compare values */
+//		foc.alpha = fmodf(foc.e_theta,60.0f);	// calculate alpha
+//
+//		foc.DC_1 = foc.DC_I*_sin(60.0f - foc.alpha);
+//		foc.DC_2 = foc.DC_I*_sin(foc.alpha);
+//		foc.DC_0 = 1.0f - foc.DC_1 - foc.DC_2;
+//
+//		foc.sector = (int)floor(foc.e_theta/60.0f);
+//
+//		switch (foc.sector)
+//		{
+//			case 0:
+//				foc.PWM_A = 0.5*foc.DC_0;
+//				foc.PWM_B = 0.5*foc.DC_0 + foc.DC_1;
+//				foc.PWM_C = 0.5*foc.DC_0 + foc.DC_1 + foc.DC_2;
+//				break;
+//			case 1:
+//				foc.PWM_A = 0.5*foc.DC_0 + foc.DC_2;
+//				foc.PWM_B = 0.5*foc.DC_0;
+//				foc.PWM_C = 0.5*foc.DC_0 + foc.DC_1 + foc.DC_2;
+//				break;
+//			case 2:
+//				foc.PWM_A = 0.5*foc.DC_0 + foc.DC_1 + foc.DC_2;
+//				foc.PWM_B = 0.5*foc.DC_0;
+//				foc.PWM_C = 0.5*foc.DC_0 + foc.DC_1;
+//				break;
+//			case 3:
+//				foc.PWM_A = 0.5*foc.DC_0 + foc.DC_1 + foc.DC_2;
+//				foc.PWM_B = 0.5*foc.DC_0 + foc.DC_2;
+//				foc.PWM_C = 0.5*foc.DC_0;
+//				break;
+//			case 4:
+//				foc.PWM_A = 0.5*foc.DC_0 + foc.DC_1;
+//				foc.PWM_B = 0.5*foc.DC_0 + foc.DC_1 + foc.DC_2;
+//				foc.PWM_C = 0.5*foc.DC_0;
+//				break;
+//			case 5:
+//				foc.PWM_A = 0.5*foc.DC_0;
+//				foc.PWM_B = 0.5*foc.DC_0 + foc.DC_1 + foc.DC_2;
+//				foc.PWM_C = 0.5*foc.DC_0 + foc.DC_2;
+//				break;
+//		}
+//
+//		//	Set_PWM3(foc.PWM_A,foc.PWM_B,foc.PWM_C);
 
 		Set_PWM3(0.25f,0.5f,0.75f);
 
