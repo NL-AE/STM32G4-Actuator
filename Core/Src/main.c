@@ -171,10 +171,6 @@ FIL_Struct fil;
 CAN_Struct can;
 CON_Struct con;
 
-int8_t  FOC_Running = 0;
-int8_t  RCR   = 0;
-uint8_t RCR_N = 7;
-
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -228,6 +224,7 @@ int main(void)
   MX_DMA_Init();
   MX_TIM2_Init();
   MX_SPI3_Init();
+  MX_TIM3_Init();
   /* USER CODE BEGIN 2 */
   printf("\n\nActuator Firmware Version: %i\n",REV);
 
@@ -241,11 +238,13 @@ int main(void)
 
   /* Start Timers */
   printf("Start TIM... ");
-  HAL_TIM_Base_Start_IT(&htim2);
+  HAL_TIM_Base_Start(&htim2);
+//  HAL_TIM_Base_Start_IT(&htim2);
   HAL_TIM_PWM_Start(&htim2, Phase_A_Ch);
   HAL_TIM_PWM_Start(&htim2, Phase_B_Ch);
   HAL_TIM_PWM_Start(&htim2, Phase_C_Ch);
   Set_PWM3(0,0,0);							// Set PWM channels to off
+  HAL_TIM_Base_Start_IT(&htim3);
   printf("Good\n");
 
   /* Start Encoder */
@@ -302,92 +301,6 @@ int main(void)
   /* USER CODE BEGIN WHILE */
   while (1)
   {
-
-	  if(RCR==0 && FOC_Running==0)	// on correct RCR and FOC algorithm isnt running,
-	  	{
-	  		/* LED on */
-	  		HAL_GPIO_WritePin(LED_Y_GPIO_Port, LED_Y_Pin, 1);
-
-	  		FOC_Running=1;	// now is running. need to set this otherwise next interrupt will run FOC again
-
-	  		/* FOC sample */
-	  		ADC_Get_Raw(&adc.i_a_Raw,&adc.i_b_Raw, &adc.PVDD_Raw, &adc.Temp_Raw);	// Read raw ADC
-	  		enc.IIF_Raw = enc.IIF_Counter;											// Get encoder angle
-
-	  		/* Filter and normalise readings */
-	  		ADC_Filter_Curr(adc.i_a_Raw,adc.i_b_Raw,&adc.i_a_Fil,&adc.i_b_Fil);		// Filter raw ADC currents
-	  		ADC_Norm_Curr  (adc.i_a_Fil,adc.i_b_Fil,&foc.i_a,&foc.i_b);				// Normalise currents
-	  		foc.m_theta = (float)enc.IIF_Raw / 4095.0f * 360.0f;					// Normalise angle to 0-360deg
-
-	  		/* FOC maths */
-	  		// Get electrical angles correct
-	  		foc.e_theta = fmodf(foc.m_theta*foc.Pole_Pairs,360.0f);	// get electrical angle and constrain in 360 deg
-
-	  		// Clarke -> alpha/beta
-	  		foc.i_alph = foc.i_a;
-	  		foc.i_beta = SQRT1_3 * (2.0f*foc.i_b - foc.i_a);
-
-	  		// Park -> direct/quadrature
-	  		float sin_Ang = _sin(foc.e_theta);
-	  		float cos_Ang = _cos(foc.e_theta);
-	  		foc.i_d = cos_Ang*foc.i_alph + sin_Ang*foc.i_beta;
-	  		foc.i_q = cos_Ang*foc.i_beta - sin_Ang*foc.i_alph;
-
-	  		/* Regulate currents */
-	  		foc.DC_I = 0.3f;				// Current duty cycle
-
-	  		/* Set PWM Compare values */
-	  		foc.alpha = fmodf(foc.e_theta,60.0f);	// calculate alpha
-
-	  		foc.DC_1 = foc.DC_I*_sin(60.0f - foc.alpha);
-	  		foc.DC_2 = foc.DC_I*_sin(foc.alpha);
-	  		foc.DC_0 = 1.0f - foc.DC_1 - foc.DC_2;
-
-	  		foc.sector = (int)floor(foc.e_theta/60.0f);
-
-	  		switch (foc.sector)
-	  		{
-	  			case 0:
-	  				foc.PWM_A = 0.5*foc.DC_0;
-	  				foc.PWM_B = 0.5*foc.DC_0 + foc.DC_1;
-	  				foc.PWM_C = 0.5*foc.DC_0 + foc.DC_1 + foc.DC_2;
-	  				break;
-	  			case 1:
-	  				foc.PWM_A = 0.5*foc.DC_0 + foc.DC_2;
-	  				foc.PWM_B = 0.5*foc.DC_0;
-	  				foc.PWM_C = 0.5*foc.DC_0 + foc.DC_1 + foc.DC_2;
-	  				break;
-	  			case 2:
-	  				foc.PWM_A = 0.5*foc.DC_0 + foc.DC_1 + foc.DC_2;
-	  				foc.PWM_B = 0.5*foc.DC_0;
-	  				foc.PWM_C = 0.5*foc.DC_0 + foc.DC_1;
-	  				break;
-	  			case 3:
-	  				foc.PWM_A = 0.5*foc.DC_0 + foc.DC_1 + foc.DC_2;
-	  				foc.PWM_B = 0.5*foc.DC_0 + foc.DC_2;
-	  				foc.PWM_C = 0.5*foc.DC_0;
-	  				break;
-	  			case 4:
-	  				foc.PWM_A = 0.5*foc.DC_0 + foc.DC_1;
-	  				foc.PWM_B = 0.5*foc.DC_0 + foc.DC_1 + foc.DC_2;
-	  				foc.PWM_C = 0.5*foc.DC_0;
-	  				break;
-	  			case 5:
-	  				foc.PWM_A = 0.5*foc.DC_0;
-	  				foc.PWM_B = 0.5*foc.DC_0 + foc.DC_1 + foc.DC_2;
-	  				foc.PWM_C = 0.5*foc.DC_0 + foc.DC_2;
-	  				break;
-	  		}
-
-	  		/* Set PWM */
-	  	//	Set_PWM3(foc.PWM_A,foc.PWM_B,foc.PWM_C);
-	  		Set_PWM3(0.066f, 0.500f, 0.933f);
-
-	  		/* LED off */
-	  		HAL_GPIO_WritePin(LED_Y_GPIO_Port, LED_Y_Pin, 0);
-
-	  		FOC_Running = 0;
-	  	}
 
     /* USER CODE END WHILE */
 
@@ -612,8 +525,84 @@ float _cos(float theta)
 // Timer Interrupts
 void  FOC_Interrupt(void)
 {
-	RCR++;					// increment
-	if(RCR>RCR_N){RCR=0;}	// overflow
+	/* LED on */
+	HAL_GPIO_WritePin(LED_Y_GPIO_Port, LED_Y_Pin, 1);
+
+	/* FOC sample */
+	ADC_Get_Raw(&adc.i_a_Raw,&adc.i_b_Raw, &adc.PVDD_Raw, &adc.Temp_Raw);	// Read raw ADC
+	enc.IIF_Raw = enc.IIF_Counter;											// Get encoder angle
+
+	/* Filter and normalise readings */
+	ADC_Filter_Curr(adc.i_a_Raw,adc.i_b_Raw,&adc.i_a_Fil,&adc.i_b_Fil);		// Filter raw ADC currents
+	ADC_Norm_Curr  (adc.i_a_Fil,adc.i_b_Fil,&foc.i_a,&foc.i_b);				// Normalise currents
+	foc.m_theta = (float)enc.IIF_Raw / 4095.0f * 360.0f;					// Normalise angle to 0-360deg
+
+	/* FOC maths */
+	// Get electrical angles correct
+	foc.e_theta = fmodf(foc.m_theta*foc.Pole_Pairs,360.0f);	// get electrical angle and constrain in 360 deg
+
+	// Clarke -> alpha/beta
+	foc.i_alph = foc.i_a;
+	foc.i_beta = SQRT1_3 * (2.0f*foc.i_b - foc.i_a);
+
+	// Park -> direct/quadrature
+	float sin_Ang = _sin(foc.e_theta);
+	float cos_Ang = _cos(foc.e_theta);
+	foc.i_d = cos_Ang*foc.i_alph + sin_Ang*foc.i_beta;
+	foc.i_q = cos_Ang*foc.i_beta - sin_Ang*foc.i_alph;
+
+	/* Regulate currents */
+	foc.DC_I = 0.5f;				// Current duty cycle
+
+	/* Set PWM Compare values */
+	foc.alpha = fmodf(foc.e_theta,60.0f);	// calculate alpha
+
+	foc.DC_1 = foc.DC_I*_sin(60.0f - foc.alpha);
+	foc.DC_2 = foc.DC_I*_sin(foc.alpha);
+	foc.DC_0 = 1.0f - foc.DC_1 - foc.DC_2;
+
+	foc.sector = (int)floor(foc.e_theta/60.0f);
+
+	switch (foc.sector)
+	{
+		case 0:
+			foc.PWM_A = 0.5*foc.DC_0;
+			foc.PWM_B = 0.5*foc.DC_0 + foc.DC_1;
+			foc.PWM_C = 0.5*foc.DC_0 + foc.DC_1 + foc.DC_2;
+			break;
+		case 1:
+			foc.PWM_A = 0.5*foc.DC_0 + foc.DC_2;
+			foc.PWM_B = 0.5*foc.DC_0;
+			foc.PWM_C = 0.5*foc.DC_0 + foc.DC_1 + foc.DC_2;
+			break;
+		case 2:
+			foc.PWM_A = 0.5*foc.DC_0 + foc.DC_1 + foc.DC_2;
+			foc.PWM_B = 0.5*foc.DC_0;
+			foc.PWM_C = 0.5*foc.DC_0 + foc.DC_1;
+			break;
+		case 3:
+			foc.PWM_A = 0.5*foc.DC_0 + foc.DC_1 + foc.DC_2;
+			foc.PWM_B = 0.5*foc.DC_0 + foc.DC_2;
+			foc.PWM_C = 0.5*foc.DC_0;
+			break;
+		case 4:
+			foc.PWM_A = 0.5*foc.DC_0 + foc.DC_1;
+			foc.PWM_B = 0.5*foc.DC_0 + foc.DC_1 + foc.DC_2;
+			foc.PWM_C = 0.5*foc.DC_0;
+			break;
+		case 5:
+			foc.PWM_A = 0.5*foc.DC_0;
+			foc.PWM_B = 0.5*foc.DC_0 + foc.DC_1 + foc.DC_2;
+			foc.PWM_C = 0.5*foc.DC_0 + foc.DC_2;
+			break;
+	}
+
+	/* Set PWM */
+//	Set_PWM3(1.0f-foc.PWM_A, 1.0f-foc.PWM_B, 1.0f-foc.PWM_C);
+	Set_PWM3(1.0f-0.066f, 1.0f-0.500f, 1.0f-0.933f);
+
+	/* LED off */
+	HAL_GPIO_WritePin(LED_Y_GPIO_Port, LED_Y_Pin, 0);
 }
 void  CAN_Interrupt(void)
 {

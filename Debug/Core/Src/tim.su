@@ -1,4 +1,5 @@
-tim.c:30:6:MX_TIM2_Init	64	static
-tim.c:92:6:HAL_TIM_Base_MspInit	24	static
-tim.c:111:6:HAL_TIM_MspPostInit	40	static
-tim.c:141:6:HAL_TIM_Base_MspDeInit	16	static
+tim.c:31:6:MX_TIM2_Init	64	static
+tim.c:93:6:MX_TIM3_Init	56	static
+tim.c:142:6:HAL_TIM_Base_MspInit	48	static
+tim.c:184:6:HAL_TIM_MspPostInit	40	static
+tim.c:214:6:HAL_TIM_Base_MspDeInit	16	static

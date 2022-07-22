@@ -79,6 +79,7 @@ void  Set_PWM3(float DC_1, float DC_2, float DC_3);		// set duty cycle values fo
 float _sin(float theta);								// sin(theta)
 float _cos(float theta);								// cos(theta)
 // Interrupts
+void  FOC_RCR(void);			// RCR interrupt
 void  FOC_Interrupt(void);		// FOC interrupt
 void  CAN_Interrupt(void);		// CAN RX interrupt
 
