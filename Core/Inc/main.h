@@ -65,8 +65,8 @@ void Error_Handler(void);
 void  ADC_Get_Raw    (int16_t*i_a_Raw, int16_t*i_b_Raw, int16_t*PVDD_Raw, int16_t*Temp_Raw);	// Reads all ADCs
 void  ADC_Filter_Curr(int16_t i_a_Raw, int16_t i_b_Raw, int16_t*i_a_Fil, int16_t*i_b_Fil);		// Put ADC readings into filter
 void  ADC_Norm_Curr  (int16_t i_a_Fil, int16_t i_b_Fil, float*i_a, float*i_b);					// Normalise ADC values to currents
-void  ADC_Filter_Misc(int16_t PVDD_Raw, int16_t Temp_Raw, int16_t*PVDD_Fil, int16_t*Temp_Fil);	// Put ADC readings into filter
-void  ADC_Norm_Misc  (int16_t PVDD_Fil, int16_t Temp_Fil, float*PVDD, float*Temp);				// Normalise ADC values to properties
+void  ADC_Filter_Misc(uint16_t PVDD_Raw, uint16_t Temp_Raw, uint16_t*PVDD_Fil, uint16_t*Temp_Fil);	// Put ADC readings into filter
+void  ADC_Norm_Misc  (uint16_t PVDD_Fil, uint16_t Temp_Fil, float*PVDD, float*Temp);				// Normalise ADC values to properties
 // Encoder
 void  ENC_Read_Ang(float*Angle);				// ask for encoder angle over SPI
 void  ENC_Read_Vel(float*Velocity);				// ask for encoder velocity over SPI

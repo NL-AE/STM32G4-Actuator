@@ -19,7 +19,6 @@
 /* Includes ------------------------------------------------------------------*/
 #include "main.h"
 #include "adc.h"
-#include "dma.h"
 #include "fdcan.h"
 #include "spi.h"
 #include "tim.h"
@@ -41,6 +40,7 @@
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
 
+// Code
 #define REV 1		// code revision
 #define PRINT 1		// want prints?
 
@@ -53,6 +53,20 @@
 #define CAN_TX_ID 2		// Transmits as this ID
 #define CAN_RX_ID 1		// Receives messages from this ID
 
+// Res Div.:	V_o = V_in * R_Bot / (R_Top + B_Bot)
+#define R_Top 255.0f		// R divider - top resistor			/ KOhms
+#define R_Bot 10.0f			// R divider - bottom resistor		/ KOhms
+
+// LM60: V_o = (6.25mV * T/C) + 424mV
+#define T_Slope  0.00625f	// T sensor  - slope	/V
+#define T_Offset 0.424f		// T sensor  - offset	/v
+
+// Op Amp
+#define R_Shunt   0.001f    // Shunt resistor /ohms
+#define OP_Gain   40.0f		// Opamp gain
+#define OP_Offset 40.0f		// Opamp offset
+
+// Macros
 #define BYTE_TO_BINARY(byte)  \
   (byte & 0x80 ? '1' : '0'), \
   (byte & 0x40 ? '1' : '0'), \
@@ -85,20 +99,14 @@ typedef struct
 // ADC
 typedef struct
 {
-	float VDDA;
+	uint16_t ADC1_DMA_Buff[2];		// DMA buffer for ADC 1
+	uint16_t ADC2_DMA_Buff[2];		// DMA buffer for ADC 2
 
-	uint32_t ADC1_DMA_Buff[2];		// DMA buffer for ADC 1
-	uint32_t ADC2_DMA_Buff[2];		// DMA buffer for ADC 2
+	float V_Bus;	// V bus
+	float Temp_C;	// Temp in C
 
-	float PVDD, V_bat_R_Bot, V_bat_R_Top;		// Temp_V_Offset/V 	and Resistor divider for PVDD	V1: V_o = Vin * R2 / (R1+R2)
-	float Temp, Temp_V_Offset, Temp_Slope;		// Board temp 		and thermocouple properties		LM60: V_o = (6.25mV * T/C) + 424mV
-
-	int16_t i_a_Raw, i_b_Raw, PVDD_Raw, Temp_Raw;	// Raw ADC readings
-	int16_t i_a_Fil, i_b_Fil, PVDD_Fil, Temp_Fil;	// Filtered ADC readings
-
-	float R_Shunt_Res;					// Shunt resistor resistance /ohms
-	int SO_Gain;						// Gain of sense amp
-	int16_t SO_A_Offset, SO_B_Offset;	// Raw offset of sense amp
+	uint16_t i_a_Raw, i_b_Raw, V_Raw, T_Raw;	// Raw ADC readings
+	uint16_t i_a_Fil, i_b_Fil, V_Fil, T_Fil;	// Filtered ADC readings
 } ADC_Struct;
 // FOC
 typedef struct
@@ -219,21 +227,24 @@ int main(void)
   /* Initialize all configured peripherals */
   MX_GPIO_Init();
   MX_ADC1_Init();
-  MX_ADC2_Init();
   MX_FDCAN1_Init();
-  MX_DMA_Init();
   MX_TIM2_Init();
   MX_SPI3_Init();
   MX_TIM3_Init();
+  MX_ADC2_Init();
   /* USER CODE BEGIN 2 */
-  printf("\n\nActuator Firmware Version: %i\n",REV);
+  printf("\nActuator Firmware Version: %i\n",REV);
 
   /* Start ADCs */
   printf("Start ADC... ");
+  HAL_ADCEx_Calibration_Start(&hadc1,LL_ADC_SINGLE_ENDED);
+  HAL_ADCEx_Calibration_Start(&hadc2,LL_ADC_SINGLE_ENDED);
+
   HAL_ADC_Start(&hadc1);
-  HAL_ADC_Start_DMA(&hadc1, (uint32_t*)adc.ADC1_DMA_Buff, 2);
   HAL_ADC_Start(&hadc2);
-  HAL_ADC_Start_DMA(&hadc2, (uint32_t*)adc.ADC2_DMA_Buff, 2);
+//  HAL_ADC_Start_DMA(&hadc1, (uint32_t*)adc.ADC1_DMA_Buff, 2);
+//  HAL_ADC_Start_DMA(&hadc2, (uint32_t*)adc.ADC2_DMA_Buff, 2);
+
   printf("Good\n");
 
   /* Start Timers */
@@ -277,15 +288,6 @@ int main(void)
   // can code
   printf("Good\n");
 
-  /* Setup ADC structure */
-  adc.VDDA = 3.30f;
-  adc.V_bat_R_Top = 255.0f;
-  adc.V_bat_R_Bot = 10.0f;
-  adc.Temp_V_Offset = 0.424f;
-  adc.Temp_Slope = 0.00625f;
-  adc.R_Shunt_Res = 0.001f;
-  adc.SO_Gain = 40.0f;
-
   /* Setup FOC structure*/
   foc.Pole_Pairs = 21.0f;
   foc.dt = (float)(2.0f/(170.0f*1000000.0f/(htim2.Init.Period+1)/(htim2.Init.RepetitionCounter+1)));
@@ -304,9 +306,22 @@ int main(void)
   while (1)
   {
 	  HAL_GPIO_WritePin(LED_G_GPIO_Port, LED_G_Pin, 1);
-	  HAL_Delay(500);
+
+	  HAL_ADC_Start(&hadc1);
+	  HAL_ADC_Start(&hadc2);
+
+	  HAL_ADC_PollForConversion(&hadc1, 1);
+
+	  adc.V_Raw = HAL_ADC_GetValue(&hadc1);
+	  adc.T_Raw = HAL_ADC_GetValue(&hadc2);
+
+	  ADC_Norm_Misc(adc.V_Raw, adc.T_Raw, &adc.V_Bus, &adc.Temp_C);
+
+	  printf("ADC1: %i\tADC2: %i\n", adc.V_Raw, adc.T_Raw);
+
+	  HAL_Delay(200);
 	  HAL_GPIO_WritePin(LED_G_GPIO_Port, LED_G_Pin, 0);
-	  HAL_Delay(500);
+	  HAL_Delay(800);
 
 
 
@@ -365,13 +380,17 @@ void SystemClock_Config(void)
 // Read ADCs
 void  ADC_Get_Raw    (int16_t*i_a_Raw, int16_t*i_b_Raw, int16_t*PVDD_Raw, int16_t*Temp_Raw)
 {
-	HAL_ADC_Start(&hadc1);
-	HAL_ADC_PollForConversion(&hadc1, 1);
-
-	*i_a_Raw	= HAL_ADC_GetValue(&hadc1);
-	*i_b_Raw	= HAL_ADC_GetValue(&hadc2);
-	*PVDD_Raw	= adc.ADC1_DMA_Buff[0];
-	*Temp_Raw	= adc.ADC2_DMA_Buff[0];
+//	HAL_ADC_Start_DMA(&hadc1, (uint32_t*)adc.ADC1_DMA_Buff, 2);
+//	HAL_ADC_Start_DMA(&hadc2, (uint32_t*)adc.ADC2_DMA_Buff, 2);
+//
+////	while(adc.ADC1_CC==0 || adc.ADC2_CC==0){}	// wait for conversion to complete
+//	adc.ADC1_CC=0;									// reset flags
+//	adc.ADC2_CC=0;
+//
+//	*i_a_Raw	= adc.ADC1_DMA_Buff[0];
+//	*i_b_Raw	= adc.ADC2_DMA_Buff[0];
+//	*PVDD_Raw	= adc.ADC1_DMA_Buff[1];
+//	*Temp_Raw	= adc.ADC2_DMA_Buff[1];
 }
 void  ADC_Filter_Curr(int16_t i_a_Raw, int16_t i_b_Raw, int16_t*i_a_Fil, int16_t*i_b_Fil)
 {
@@ -388,10 +407,10 @@ void  ADC_Filter_Curr(int16_t i_a_Raw, int16_t i_b_Raw, int16_t*i_a_Fil, int16_t
 }
 void  ADC_Norm_Curr  (int16_t i_a_Fil, int16_t i_b_Fil, float*i_a, float*i_b)
 {
-	*i_a = (((float)(i_a_Fil-adc.SO_A_Offset))*adc.VDDA/4095.0f)/adc.SO_Gain/adc.R_Shunt_Res;
-	*i_b = (((float)(i_b_Fil-adc.SO_B_Offset))*adc.VDDA/4095.0f)/adc.SO_Gain/adc.R_Shunt_Res;
+	*i_a = (((float)(i_a_Fil-OP_Offset))*3.3f/4095.0f)/OP_Gain/R_Shunt;
+	*i_b = (((float)(i_b_Fil-OP_Offset))*3.3f/4095.0f)/OP_Gain/R_Shunt;
 }
-void  ADC_Filter_Misc(int16_t PVDD_Raw, int16_t Temp_Raw, int16_t*PVDD_Fil, int16_t*Temp_Fil)
+void  ADC_Filter_Misc(uint16_t PVDD_Raw, uint16_t Temp_Raw, uint16_t*PVDD_Fil, uint16_t*Temp_Fil)
 {
 	// Filter
 	*PVDD_Fil = fil.Misc_k[0]*PVDD_Raw + fil.Misc_k[0]*fil.PVDD_Pre + fil.Misc_k[1]*fil.PVDD_Pre_Fil;
@@ -404,10 +423,10 @@ void  ADC_Filter_Misc(int16_t PVDD_Raw, int16_t Temp_Raw, int16_t*PVDD_Fil, int1
 	fil.PVDD_Pre_Fil = *PVDD_Fil;
 	fil.Temp_Pre_Fil = *Temp_Fil;
 }
-void  ADC_Norm_Misc  (int16_t PVDD_Fil, int16_t Temp_Fil, float*PVDD, float*Temp)
+void  ADC_Norm_Misc  (uint16_t PVDD_Fil, uint16_t Temp_Fil, float*PVDD, float*Temp)
 {
-	*PVDD = (float)PVDD_Fil*adc.VDDA/4095.0f / adc.V_bat_R_Bot * (adc.V_bat_R_Bot+adc.V_bat_R_Top);
-	*Temp = (((float)Temp_Fil*adc.VDDA/4095.0f)-adc.Temp_V_Offset)/adc.Temp_Slope;
+	*PVDD = (float)PVDD_Fil*3.3f/4095.0f / R_Bot * (R_Bot + R_Top);
+	*Temp = (((float)Temp_Fil*3.3f/4095.0f)-T_Offset)/T_Slope;
 }
 // Encoder
 void  ENC_Read_Ang(float*Angle)
@@ -536,78 +555,78 @@ void  FOC_Interrupt(void)
 	/* LED on */
 	HAL_GPIO_WritePin(LED_Y_GPIO_Port, LED_Y_Pin, 1);
 
-	/* FOC sample */
-	ADC_Get_Raw(&adc.i_a_Raw,&adc.i_b_Raw, &adc.PVDD_Raw, &adc.Temp_Raw);	// Read raw ADC
-	enc.IIF_Raw = enc.IIF_Counter;											// Get encoder angle
-
-	/* Filter and normalise readings */
-	ADC_Filter_Curr(adc.i_a_Raw,adc.i_b_Raw,&adc.i_a_Fil,&adc.i_b_Fil);		// Filter raw ADC currents
-	ADC_Norm_Curr  (adc.i_a_Fil,adc.i_b_Fil,&foc.i_a,&foc.i_b);				// Normalise currents
-	foc.m_theta = (float)enc.IIF_Raw / 4095.0f * 360.0f;					// Normalise angle to 0-360deg
-
-	/* FOC maths */
-	// Get electrical angles correct
-	foc.e_theta = fmodf(foc.m_theta*foc.Pole_Pairs,360.0f);	// get electrical angle and constrain in 360 deg
-
-	// Clarke -> alpha/beta
-	foc.i_alph = foc.i_a;
-	foc.i_beta = SQRT1_3 * (2.0f*foc.i_b - foc.i_a);
-
-	// Park -> direct/quadrature
-	float sin_Ang = _sin(foc.e_theta);
-	float cos_Ang = _cos(foc.e_theta);
-	foc.i_d = cos_Ang*foc.i_alph + sin_Ang*foc.i_beta;
-	foc.i_q = cos_Ang*foc.i_beta - sin_Ang*foc.i_alph;
-
-	/* Regulate currents */
-	foc.DC_I = 0.5f;				// Current duty cycle
-
-	/* Set PWM Compare values */
-	foc.alpha = fmodf(foc.e_theta,60.0f);	// calculate alpha
-
-	foc.DC_1 = foc.DC_I*_sin(60.0f - foc.alpha);
-	foc.DC_2 = foc.DC_I*_sin(foc.alpha);
-	foc.DC_0 = 1.0f - foc.DC_1 - foc.DC_2;
-
-	foc.sector = (int)floor(foc.e_theta/60.0f);
-
-	switch (foc.sector)
-	{
-		case 0:
-			foc.PWM_A = 0.5*foc.DC_0;
-			foc.PWM_B = 0.5*foc.DC_0 + foc.DC_1;
-			foc.PWM_C = 0.5*foc.DC_0 + foc.DC_1 + foc.DC_2;
-			break;
-		case 1:
-			foc.PWM_A = 0.5*foc.DC_0 + foc.DC_2;
-			foc.PWM_B = 0.5*foc.DC_0;
-			foc.PWM_C = 0.5*foc.DC_0 + foc.DC_1 + foc.DC_2;
-			break;
-		case 2:
-			foc.PWM_A = 0.5*foc.DC_0 + foc.DC_1 + foc.DC_2;
-			foc.PWM_B = 0.5*foc.DC_0;
-			foc.PWM_C = 0.5*foc.DC_0 + foc.DC_1;
-			break;
-		case 3:
-			foc.PWM_A = 0.5*foc.DC_0 + foc.DC_1 + foc.DC_2;
-			foc.PWM_B = 0.5*foc.DC_0 + foc.DC_2;
-			foc.PWM_C = 0.5*foc.DC_0;
-			break;
-		case 4:
-			foc.PWM_A = 0.5*foc.DC_0 + foc.DC_1;
-			foc.PWM_B = 0.5*foc.DC_0 + foc.DC_1 + foc.DC_2;
-			foc.PWM_C = 0.5*foc.DC_0;
-			break;
-		case 5:
-			foc.PWM_A = 0.5*foc.DC_0;
-			foc.PWM_B = 0.5*foc.DC_0 + foc.DC_1 + foc.DC_2;
-			foc.PWM_C = 0.5*foc.DC_0 + foc.DC_2;
-			break;
-	}
+//	/* FOC sample */
+//	enc.IIF_Raw = enc.IIF_Counter;											// Copy current encoder angle
+//	ADC_Get_Raw(&adc.i_a_Raw,&adc.i_b_Raw, &adc.PVDD_Raw, &adc.Temp_Raw);	// Read raw ADC
+//
+//	/* Filter and normalise readings */
+//	ADC_Filter_Curr(adc.i_a_Raw,adc.i_b_Raw,&adc.i_a_Fil,&adc.i_b_Fil);		// Filter raw ADC currents
+//	ADC_Norm_Curr  (adc.i_a_Fil,adc.i_b_Fil,&foc.i_a,&foc.i_b);				// Normalise currents
+//	foc.m_theta = (float)enc.IIF_Raw / 4095.0f * 360.0f;					// Normalise angle to 0-360deg
+//
+//	/* FOC maths */
+//	// Get electrical angles correct
+//	foc.e_theta = fmodf(foc.m_theta*foc.Pole_Pairs,360.0f);	// get electrical angle and constrain in 360 deg
+//
+//	// Clarke -> alpha/beta
+//	foc.i_alph = foc.i_a;
+//	foc.i_beta = SQRT1_3 * (2.0f*foc.i_b - foc.i_a);
+//
+//	// Park -> direct/quadrature
+//	float sin_Ang = _sin(foc.e_theta);
+//	float cos_Ang = _cos(foc.e_theta);
+//	foc.i_d = cos_Ang*foc.i_alph + sin_Ang*foc.i_beta;
+//	foc.i_q = cos_Ang*foc.i_beta - sin_Ang*foc.i_alph;
+//
+//	/* Regulate currents */
+//	foc.DC_I = 0.5f;				// Current duty cycle
+//
+//	/* Set PWM Compare values */
+//	foc.alpha = fmodf(foc.e_theta,60.0f);	// calculate alpha
+//
+//	foc.DC_1 = foc.DC_I*_sin(60.0f - foc.alpha);
+//	foc.DC_2 = foc.DC_I*_sin(foc.alpha);
+//	foc.DC_0 = 1.0f - foc.DC_1 - foc.DC_2;
+//
+//	foc.sector = (int)floor(foc.e_theta/60.0f);
+//
+//	switch (foc.sector)
+//	{
+//		case 0:
+//			foc.PWM_A = 0.5*foc.DC_0;
+//			foc.PWM_B = 0.5*foc.DC_0 + foc.DC_1;
+//			foc.PWM_C = 0.5*foc.DC_0 + foc.DC_1 + foc.DC_2;
+//			break;
+//		case 1:
+//			foc.PWM_A = 0.5*foc.DC_0 + foc.DC_2;
+//			foc.PWM_B = 0.5*foc.DC_0;
+//			foc.PWM_C = 0.5*foc.DC_0 + foc.DC_1 + foc.DC_2;
+//			break;
+//		case 2:
+//			foc.PWM_A = 0.5*foc.DC_0 + foc.DC_1 + foc.DC_2;
+//			foc.PWM_B = 0.5*foc.DC_0;
+//			foc.PWM_C = 0.5*foc.DC_0 + foc.DC_1;
+//			break;
+//		case 3:
+//			foc.PWM_A = 0.5*foc.DC_0 + foc.DC_1 + foc.DC_2;
+//			foc.PWM_B = 0.5*foc.DC_0 + foc.DC_2;
+//			foc.PWM_C = 0.5*foc.DC_0;
+//			break;
+//		case 4:
+//			foc.PWM_A = 0.5*foc.DC_0 + foc.DC_1;
+//			foc.PWM_B = 0.5*foc.DC_0 + foc.DC_1 + foc.DC_2;
+//			foc.PWM_C = 0.5*foc.DC_0;
+//			break;
+//		case 5:
+//			foc.PWM_A = 0.5*foc.DC_0;
+//			foc.PWM_B = 0.5*foc.DC_0 + foc.DC_1 + foc.DC_2;
+//			foc.PWM_C = 0.5*foc.DC_0 + foc.DC_2;
+//			break;
+//	}
 
 	/* Set PWM */
 //	Set_PWM3(1.0f-foc.PWM_A, 1.0f-foc.PWM_B, 1.0f-foc.PWM_C);
-	Set_PWM3(1.0f-0.066f, 1.0f-0.500f, 1.0f-0.933f);
+//	Set_PWM3(1.0f-0.066f, 1.0f-0.500f, 1.0f-0.933f);
 
 	/* LED off */
 	HAL_GPIO_WritePin(LED_Y_GPIO_Port, LED_Y_Pin, 0);
