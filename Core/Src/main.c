@@ -239,12 +239,14 @@ int main(void)
   /* Start Timers */
   printf("Start TIM... ");
   HAL_TIM_Base_Start(&htim2);
-//  HAL_TIM_Base_Start_IT(&htim2);
+  while(__HAL_TIM_GET_COUNTER(&htim2)<858+20){}	// wait for cycles to sync up clocks
+  	  	  	  	  	  	  	  	  	  	  	  	// 858 cycles for middle
+  	  	  	  	  	  	  	  	  	  	  	    // each cycle delays by around 7.5ns
+  HAL_TIM_Base_Start_IT(&htim3);
   HAL_TIM_PWM_Start(&htim2, Phase_A_Ch);
   HAL_TIM_PWM_Start(&htim2, Phase_B_Ch);
   HAL_TIM_PWM_Start(&htim2, Phase_C_Ch);
-  Set_PWM3(0,0,0);							// Set PWM channels to off
-  HAL_TIM_Base_Start_IT(&htim3);
+  Set_PWM3(0,0,0);							// Set PWM channels to same value
   printf("Good\n");
 
   /* Start Encoder */
@@ -301,6 +303,12 @@ int main(void)
   /* USER CODE BEGIN WHILE */
   while (1)
   {
+	  HAL_GPIO_WritePin(LED_G_GPIO_Port, LED_G_Pin, 1);
+	  HAL_Delay(500);
+	  HAL_GPIO_WritePin(LED_G_GPIO_Port, LED_G_Pin, 0);
+	  HAL_Delay(500);
+
+
 
     /* USER CODE END WHILE */
 
@@ -664,6 +672,11 @@ void Error_Handler(void)
   __disable_irq();
   while (1)
   {
+	  printf("Hardware Error\n");
+	  HAL_GPIO_WritePin(LED_Y_GPIO_Port, LED_Y_Pin, 1);
+	  HAL_Delay(200);
+	  HAL_GPIO_WritePin(LED_Y_GPIO_Port, LED_Y_Pin, 0);
+	  HAL_Delay(800);
   }
   /* USER CODE END Error_Handler_Debug */
 }
